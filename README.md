@@ -2,6 +2,21 @@
 
 A production-grade, local flight data engineering pipeline that ingests live aircraft state vector data from the OpenSky Network REST API, applies PySpark data quality transformations, persists date-partitioned Lakehouse datasets, and exposes an interactive Streamlit visualization serving layer.
 
+**Live Demo**: [https://flight-data-pipeline-jcpcyaz4r2nbjtg7euz2sz.streamlit.app/](https://flight-data-pipeline-jcpcyaz4r2nbjtg7euz2sz.streamlit.app/)
+
+---
+
+## Screenshots
+
+### Live map — global aircraft positions, colour-encoded by speed
+![Live map view](docs/screenshots/dashboard_live_map.png)
+
+### Analytics — aircraft by country and speed distribution
+![Analytics tab](docs/screenshots/dashboard_analytics.png)
+
+### Fleet data — fastest flights and grounded aircraft tables
+![Fleet data tab](docs/screenshots/dashboard_fleet_data.png)
+
 ---
 
 ## 🏗 Architecture & Data Flow
@@ -102,6 +117,11 @@ pip install -r requirements.txt
   - `run_pipeline.py`         — Main runner orchestrating ETL and partitioned storage writes
   - `Logo2.png`               — Dashboard header logo asset
   - `summary_data_pipeline.pdf` — Architecture summary report document
+- `docs/`                     — Documentation assets
+  - `screenshots/`            — Dashboard screenshot gallery
+    - `dashboard_live_map.png`   — Live map tab screenshot
+    - `dashboard_analytics.png`  — Analytics tab screenshot
+    - `dashboard_fleet_data.png` — Fleet data tab screenshot
 - `output/`                   — Partitioned Lakehouse storage destination (Parquet / CSV)
   - `.gitkeep`                — Git directory preservation file
 - `tests/`                    — Automated unit test suite
