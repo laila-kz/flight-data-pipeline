@@ -1,137 +1,112 @@
-# dashboard.py
-import streamlit as st
+"""
+Live Flight Operations Dashboard.
+Restrained, data-first internal analytics interface built with Streamlit & Plotly.
+"""
+
+from datetime import datetime
+import os
+from pathlib import Path
 import pandas as pd
 import plotly.express as px
-from pathlib import Path
+import streamlit as st
 
-st.set_page_config(page_title=" Live Flight Dashboard", layout="wide")
+try:
+    from flight_pipeline.styles import inject_css
+except ImportError:
+    from styles import inject_css
 
-st.markdown(
-    """
-    <style>
-        @import url('https://fonts.google.com/specimen/Lato');
-
-        html, body, [class*="css"] {
-            font-family: 'Manrope', sans-serif;
-        }
-
-        .dashboard-title {
-            font-size: 2.2rem;
-            font-weight: 800;
-            color: #0f2742;
-            margin-bottom: 0.1rem;
-            line-height: 1.1;
-        }
-
-        .dashboard-subtitle {
-            color: #3f5368;
-            font-size: 1rem;
-            font-weight: 500;
-            margin-bottom: 1.2rem;
-        }
-
-        .section-title {
-            font-size: 1.25rem;
-            font-weight: 700;
-            color: #17324d;
-            margin-top: 0.4rem;
-            margin-bottom: 0.6rem;
-        }
-
-        .kpi-card {
-            background: linear-gradient(135deg, #f5f9ff 0%, #e7f0ff 100%);
-            border: 1px solid #d1e0f5;
-            border-radius: 14px;
-            padding: 14px 16px;
-            box-shadow: 0 3px 10px rgba(29, 53, 87, 0.08);
-        }
-
-        .kpi-label {
-            color: #37526d;
-            font-size: 0.9rem;
-            font-weight: 700;
-            margin-bottom: 0.3rem;
-        }
-
-        .kpi-value {
-            color: #0f2742;
-            font-size: 1.6rem;
-            font-weight: 800;
-            line-height: 1.1;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
+# ==========================================
+# 1. Page Config & Style Injection
+# ==========================================
+st.set_page_config(
+    page_title="Live flight operations",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# Resolve output folder from project root so dashboard works from any current directory.
+inject_css()
+
+# ==========================================
+# 2. Data Loading & Lake Engine Detection
+# ==========================================
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "output"
 
-logo_candidates = [
-    Path(__file__).resolve().parent / "Logo.png",
-    PROJECT_ROOT / "Logo2.png",
-    PROJECT_ROOT / "assets" / "Logo2.png",
-]
-logo_path = next((path for path in logo_candidates if path.exists()), None)
 
-title_logo_col, title_text_col = st.columns([1, 10], gap="small")
-with title_logo_col:
-    if logo_path:
-        st.image(str(logo_path), width=76)
-    else:
-        st.markdown(
-            "<div style='font-size:2.1rem; line-height:1.8; text-align:center;'>✈</div>",
-            unsafe_allow_html=True,
-        )
-
-with title_text_col:
-    st.markdown('<div class="dashboard-title">Live Flight Dashboard</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="dashboard-subtitle">Realtime aircraft data from the OpenSky API processed with Spark</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def load_dataset(name: str):
+def load_dataset(name: str) -> pd.DataFrame:
+    """Loads dataset from parquet lake storage or fallback CSV."""
     parquet_dir = OUTPUT_DIR / name
     parquet_file = OUTPUT_DIR / f"{name}.parquet"
     csv_file = OUTPUT_DIR / f"{name}.csv"
 
     if parquet_dir.exists():
-        return pd.read_parquet(parquet_dir)
+        try:
+            return pd.read_parquet(parquet_dir)
+        except Exception:
+            pass
     if parquet_file.exists():
-        return pd.read_parquet(parquet_file)
+        try:
+            return pd.read_parquet(parquet_file)
+        except Exception:
+            pass
     if csv_file.exists():
-        return pd.read_csv(csv_file)
-    return None
+        try:
+            return pd.read_csv(csv_file)
+        except Exception:
+            pass
+    return pd.DataFrame()
 
 
 flights_df = load_dataset("flights")
-if flights_df is None:
+
+if flights_df.empty:
     st.error(
-        f"No output data found in {OUTPUT_DIR}. Run the pipeline first to generate flights data."
+        f"No output data found in dataset path {OUTPUT_DIR}. "
+        "Run 'python flight_pipeline/run_pipeline.py' first to generate pipeline outputs."
     )
     st.stop()
 
-stats_df = load_dataset("stats")
-if stats_df is None or stats_df.empty:
-    stats_df = pd.DataFrame(
-        [
-            {
-                "num_events": len(flights_df),
-                "distinct_aircraft": flights_df["icao24"].nunique(dropna=True),
-                "max_velocity": pd.to_numeric(
-                    flights_df.get("velocity", pd.Series(dtype="float")),
-                    errors="coerce",
-                ).max(),
-            }
-        ]
-    )
+# Real storage sink detection
+is_parquet = (OUTPUT_DIR / "flights").is_dir() or (OUTPUT_DIR / "flights.parquet").exists() or os.getenv("PIPELINE_ENABLE_PARQUET", "0") == "1"
+sink_type = "Parquet" if is_parquet else "CSV"
 
-aircraft_country_df = load_dataset("aircraft_by_country")
-if aircraft_country_df is None or aircraft_country_df.empty:
-    aircraft_country_df = (
+# Field conversions
+if "velocity" in flights_df.columns:
+    flights_df["velocity"] = pd.to_numeric(flights_df["velocity"], errors="coerce").fillna(0.0)
+    flights_df["velocity_kmh"] = (flights_df["velocity"] * 3.6).round(1)
+else:
+    flights_df["velocity"] = 0.0
+    flights_df["velocity_kmh"] = 0.0
+
+if "baro_altitude" in flights_df.columns:
+    flights_df["baro_altitude"] = pd.to_numeric(flights_df["baro_altitude"], errors="coerce").fillna(0.0)
+else:
+    flights_df["baro_altitude"] = 0.0
+
+if "on_ground" in flights_df.columns:
+    flights_df["on_ground"] = flights_df["on_ground"].astype(bool)
+else:
+    flights_df["on_ground"] = False
+
+if "latitude" in flights_df.columns:
+    flights_df["latitude"] = pd.to_numeric(flights_df["latitude"], errors="coerce")
+if "longitude" in flights_df.columns:
+    flights_df["longitude"] = pd.to_numeric(flights_df["longitude"], errors="coerce")
+
+# Calculate metrics without redundant math
+total_flights = len(flights_df)
+airborne_df = flights_df[~flights_df["on_ground"]]
+ground_df = flights_df[flights_df["on_ground"]]
+
+airborne_count = len(airborne_df)
+ground_count = len(ground_df)
+avg_velocity_kmh = airborne_df["velocity_kmh"].mean() if not airborne_df.empty else 0.0
+max_velocity_kmh = flights_df["velocity_kmh"].max() if not flights_df.empty else 0.0
+
+# Load auxiliary analytics datasets
+country_df = load_dataset("aircraft_by_country")
+if country_df.empty and not flights_df.empty:
+    country_df = (
         flights_df.dropna(subset=["origin_country", "icao24"])
         .groupby("origin_country", as_index=False)["icao24"]
         .nunique()
@@ -140,170 +115,293 @@ if aircraft_country_df is None or aircraft_country_df.empty:
     )
 
 fastest_df = load_dataset("fastest_flights")
-if fastest_df is None or fastest_df.empty:
+if fastest_df.empty and not flights_df.empty:
     fastest_df = flights_df.sort_values("velocity", ascending=False).head(10)
 
-ground_df = load_dataset("flights_on_ground")
-if ground_df is None:
-    ground_df = flights_df[flights_df.get("on_ground", False) == True]
-
-if "velocity" in flights_df.columns:
-    flights_df["velocity"] = pd.to_numeric(flights_df["velocity"], errors="coerce")
 if "velocity" in fastest_df.columns:
-    fastest_df["velocity"] = pd.to_numeric(fastest_df["velocity"], errors="coerce")
+    fastest_df["velocity_kmh"] = (pd.to_numeric(fastest_df["velocity"], errors="coerce") * 3.6).round(1)
 
+# Timestamp calculation
+now = datetime.utcnow()
+last_sync_str = now.strftime("%H:%M:%S UTC")
 
-def format_kpi_value(value, decimals=0):
-    if pd.isna(value):
-        return "N/A"
-    if decimals == 0:
-        return f"{int(value):,}"
-    return f"{float(value):,.{decimals}f}"
-
-# ==============================
-# 1️⃣ Top KPIs
-# ==============================
-st.markdown('<div class="section-title">📊 Key Performance Indicators</div>', unsafe_allow_html=True)
-
-kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
-
-with kpi_col1:
+# ==========================================
+# 3. Sidebar Layout
+# ==========================================
+with st.sidebar:
+    st.markdown('<div class="sidebar-heading">Pipeline</div>', unsafe_allow_html=True)
     st.markdown(
-        f"""
-        <div class="kpi-card">
-            <div class="kpi-label">🧾 Total Events</div>
-            <div class="kpi-value">{format_kpi_value(stats_df['num_events'].values[0])}</div>
+        '''
+        <div class="sidebar-row">
+            <span class="sidebar-label">Status</span>
+            <span class="sidebar-val" style="display:flex; align-items:center; gap:6px;">
+                <span class="status-dot ok"></span> Active
+            </span>
         </div>
-        """,
+        <div class="sidebar-row" style="font-size:12px; color:var(--text-muted); margin-top:2px;">
+            <span>OpenSky API → PySpark → Lakehouse</span>
+        </div>
+        ''',
         unsafe_allow_html=True,
     )
 
-with kpi_col2:
+    st.markdown('<hr style="border-color:var(--border); margin: 16px 0;">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-heading">Refresh</div>', unsafe_allow_html=True)
+    refresh_interval = st.number_input(
+        "Refresh interval (s)", min_value=10, max_value=600, value=60, step=10, label_visibility="collapsed"
+    )
+    if st.button("Refresh now", use_container_width=True):
+        st.rerun()
+
+    st.markdown('<hr style="border-color:var(--border); margin: 16px 0;">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-heading">Telemetry</div>', unsafe_allow_html=True)
     st.markdown(
-        f"""
-        <div class="kpi-card">
-            <div class="kpi-label">🛩 Distinct Aircraft</div>
-            <div class="kpi-value">{format_kpi_value(stats_df['distinct_aircraft'].values[0])}</div>
+        f'''
+        <div class="sidebar-row">
+            <span class="sidebar-label">Records</span>
+            <span class="sidebar-val">{total_flights:,}</span>
         </div>
-        """,
+        <div class="sidebar-row">
+            <span class="sidebar-label">Storage sink</span>
+            <span class="sidebar-val">{sink_type}</span>
+        </div>
+        ''',
         unsafe_allow_html=True,
     )
 
-with kpi_col3:
-    st.markdown(
-        f"""
-        <div class="kpi-card">
-            <div class="kpi-label">⚡ Max Velocity (m/s)</div>
-            <div class="kpi-value">{format_kpi_value(stats_df['max_velocity'].values[0], 2)}</div>
+# ==========================================
+# 4. Header & Restrained KPI Row
+# ==========================================
+st.markdown(
+    f'''
+    <div class="app-header">
+        <h1 class="app-title">Live flight operations</h1>
+        <div class="app-subtitle">
+            OpenSky state vectors · PySpark · {sink_type}
+            <span>·</span>
+            <span class="status-dot ok"></span> Updated {last_sync_str}
         </div>
-        """,
+    </div>
+    ''',
+    unsafe_allow_html=True,
+)
+
+# 4 Equal-height, single-line KPI Cards
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+
+with kpi1:
+    st.markdown(
+        f'''
+        <div class="kpi-card" title="Active in-flight state vectors">
+            <div class="kpi-label">Airborne</div>
+            <div class="kpi-value">{airborne_count:,}</div>
+        </div>
+        ''',
         unsafe_allow_html=True,
     )
 
-
-def style_figure(fig):
-    fig.update_layout(
-        template="plotly_white",
-        paper_bgcolor="#fbfdff",
-        plot_bgcolor="#fbfdff",
-        font=dict(family="Manrope, sans-serif", color="#16324a"),
-        margin=dict(l=30, r=20, t=60, b=30),
+with kpi2:
+    st.markdown(
+        f'''
+        <div class="kpi-card" title="Aircraft taxied or stationary on ground">
+            <div class="kpi-label">On ground</div>
+            <div class="kpi-value">{ground_count:,}</div>
+        </div>
+        ''',
+        unsafe_allow_html=True,
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#d7e3f3", zeroline=False, title_standoff=8)
-    fig.update_yaxes(showgrid=True, gridcolor="#d7e3f3", zeroline=False, title_standoff=8)
-    return fig
 
+with kpi3:
+    st.markdown(
+        f'''
+        <div class="kpi-card" title="Average speed of airborne aircraft">
+            <div class="kpi-label">Avg speed</div>
+            <div class="kpi-value">{avg_velocity_kmh:.0f} <span class="kpi-unit">km/h</span></div>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
 
-left_col, right_col = st.columns([1, 1], gap="large")
+with kpi4:
+    st.markdown(
+        f'''
+        <div class="kpi-card" title="Maximum speed recorded across fleet">
+            <div class="kpi-label">Peak speed</div>
+            <div class="kpi-value">{max_velocity_kmh:.0f} <span class="kpi-unit">km/h</span></div>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
 
-# ==============================
-# 2️⃣ Aircraft by Country Bar Chart
-# ==============================
-with left_col:
-    with st.container(border=True):
-        st.markdown('<div class="section-title">🌍 Aircraft by Country</div>', unsafe_allow_html=True)
-        chart_df = aircraft_country_df.sort_values("num_aircraft", ascending=False).head(15)
-        fig_country = px.bar(
-            chart_df,
-            x="origin_country",
-            y="num_aircraft",
-            title="Number of Aircraft per Country",
-            labels={"origin_country": "Country", "num_aircraft": "Aircraft Count"},
-            color="num_aircraft",
-            color_continuous_scale="Blues",
-            height=430,
-        )
-        fig_country = style_figure(fig_country)
-        st.plotly_chart(fig_country, use_container_width=True)
+st.markdown("<div style='margin-bottom: 24px;'></div>", unsafe_allow_html=True)
 
-# ==============================
-# 3️⃣ Top 10 Fastest Flights
-# ==============================
-with right_col:
-    with st.container(border=True):
-        st.markdown('<div class="section-title">⚡ Top 10 Fastest Flights</div>', unsafe_allow_html=True)
-        fastest_display = fastest_df[[c for c in ["icao24", "callsign", "origin_country", "velocity"] if c in fastest_df.columns]].copy()
-        if "velocity" in fastest_display.columns:
-            fastest_display["velocity"] = fastest_display["velocity"].round(2)
-        st.dataframe(
-            fastest_display,
-            use_container_width=True,
-            hide_index=True,
-            height=430,
-        )
+# ==========================================
+# 5. Flat Underline Tabs & Components
+# ==========================================
+tab_map, tab_analytics, tab_fleet = st.tabs(["Live map", "Analytics", "Fleet data"])
 
-# ==============================
-# 4️⃣ Flights on the Ground
-# ==============================
-with st.container(border=True):
-    st.markdown('<div class="section-title">🛬 Flights on the Ground</div>', unsafe_allow_html=True)
-    ground_display = ground_df[[c for c in ["icao24", "callsign", "origin_country", "longitude", "latitude"] if c in ground_df.columns]].copy()
-    st.dataframe(ground_display, use_container_width=True, hide_index=True, height=260)
+# ------------------------------------------
+# TAB 1: Plotly Map with Low Opacity Markers
+# ------------------------------------------
+with tab_map:
+    map_df = flights_df.dropna(subset=["latitude", "longitude"]).copy()
 
-# ==============================
-# 5️⃣ Aircraft Map
-# ==============================
-with st.container(border=True):
-    st.markdown('<div class="section-title">✈️ Aircraft Positions on World Map</div>', unsafe_allow_html=True)
-
-    flights_map_df = flights_df.dropna(subset=["latitude", "longitude"]).copy()
-    if "velocity" in flights_map_df.columns:
-        flights_map_df["velocity"] = pd.to_numeric(flights_map_df["velocity"], errors="coerce")
+    if map_df.empty:
+        st.info("No geographic coordinate data available.")
     else:
-        flights_map_df["velocity"] = 0
+        fig_map = px.scatter_geo(
+            map_df,
+            lat="latitude",
+            lon="longitude",
+            hover_name="callsign",
+            hover_data={
+                "icao24": True,
+                "origin_country": True,
+                "velocity_kmh": ":.0f",
+                "baro_altitude": ":,.0f",
+                "on_ground": True,
+                "latitude": False,
+                "longitude": False,
+            },
+            color="velocity_kmh",
+            color_continuous_scale="cividis",
+            projection="natural earth",
+            height=560,
+        )
 
-    fig_map = px.scatter_geo(
-        flights_map_df,
-        lat="latitude",
-        lon="longitude",
-        hover_name="icao24",
-        hover_data={"velocity": ":.2f", "origin_country": True, "on_ground": True},
-        color="velocity",
-        color_continuous_scale="Turbo",
-        opacity=0.75,
-        title="Live Aircraft Positions",
-        projection="natural earth",
-        height=520,
-    )
-    fig_map.update_traces(marker=dict(size=6, line=dict(width=0.5, color="#f8fbff")))
-    fig_map.update_layout(
-        template="plotly_white",
-        paper_bgcolor="#fbfdff",
-        font=dict(family="Manrope, sans-serif", color="#16324a"),
-        margin=dict(l=10, r=10, t=60, b=10),
-        geo=dict(showland=True, landcolor="#edf3fb", showocean=True, oceancolor="#dceafb"),
-    )
-    st.plotly_chart(fig_map, use_container_width=True)
+        fig_map.update_traces(marker=dict(size=4, opacity=0.55))
 
-# ==============================
-# Optional: Auto-refresh
-# ==============================
-st.sidebar.header("Dashboard Controls")
-refresh_interval = st.sidebar.number_input(
-    "Refresh interval (seconds)", min_value=10, max_value=600, value=60, step=10
-)
+        fig_map.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Inter, sans-serif", color="#E6EAF0", size=12),
+            margin=dict(l=0, r=0, t=10, b=0),
+            geo=dict(
+                bgcolor="#0E1116",
+                showland=True,
+                landcolor="#151A21",
+                showocean=True,
+                oceancolor="#0E1116",
+                showlakes=True,
+                lakecolor="#0E1116",
+                showcountries=True,
+                countrycolor="#242C37",
+                coastlinecolor="#242C37",
+            ),
+            coloraxis_colorbar=dict(
+                title=dict(text="Speed (km/h)", font=dict(color="#8A94A3", size=11)),
+                thickness=10,
+                len=0.6,
+                tickfont=dict(color="#8A94A3", size=11),
+            ),
+        )
 
-st.sidebar.markdown(
-    f"Dashboard will refresh every **{refresh_interval} seconds**. "
-    "Run the pipeline script periodically to update the output files (parquet or csv)."
-)
+        st.plotly_chart(fig_map, use_container_width=True, config={"displayModeBar": False})
+
+# ------------------------------------------
+# TAB 2: Clean Analytics Charts
+# ------------------------------------------
+with tab_analytics:
+    col1, col2 = st.columns(2, gap="large")
+
+    with col1:
+        st.markdown('<div class="sidebar-heading" style="margin-top:0;">Aircraft by country</div>', unsafe_allow_html=True)
+        if not country_df.empty:
+            top_countries = country_df.sort_values("num_aircraft", ascending=True).tail(10)
+            fig_country = px.bar(
+                top_countries,
+                x="num_aircraft",
+                y="origin_country",
+                orientation="h",
+                color_discrete_sequence=["#4C9AFF"],
+                height=380,
+            )
+
+            fig_country.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Inter, sans-serif", color="#8A94A3", size=11),
+                xaxis=dict(showgrid=False, title="Aircraft count", color="#8A94A3"),
+                yaxis=dict(showgrid=False, title="", color="#8A94A3"),
+                margin=dict(l=0, r=0, t=10, b=0),
+            )
+
+            st.plotly_chart(fig_country, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.info("No country analytics data available.")
+
+    with col2:
+        st.markdown('<div class="sidebar-heading" style="margin-top:0;">Speed distribution</div>', unsafe_allow_html=True)
+        if not flights_df.empty:
+            fig_hist = px.histogram(
+                flights_df[flights_df["velocity_kmh"] > 0],
+                x="velocity_kmh",
+                nbins=25,
+                color_discrete_sequence=["#4C9AFF"],
+                height=380,
+            )
+
+            fig_hist.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Inter, sans-serif", color="#8A94A3", size=11),
+                xaxis=dict(showgrid=False, title="Speed (km/h)", color="#8A94A3"),
+                yaxis=dict(showgrid=False, title="Count", color="#8A94A3"),
+                margin=dict(l=0, r=0, t=10, b=0),
+                bargap=0.1,
+            )
+
+            st.plotly_chart(fig_hist, use_container_width=True, config={"displayModeBar": False})
+
+# ------------------------------------------
+# TAB 3: Fleet Data Tables
+# ------------------------------------------
+with tab_fleet:
+    tcol1, tcol2 = st.columns(2, gap="large")
+
+    with tcol1:
+        st.markdown('<div class="sidebar-heading" style="margin-top:0;">Top 10 fastest flights</div>', unsafe_allow_html=True)
+        if not fastest_df.empty:
+            display_fastest = fastest_df[
+                [c for c in ["callsign", "icao24", "origin_country", "velocity_kmh", "baro_altitude"] if c in fastest_df.columns]
+            ].copy()
+
+            st.dataframe(
+                display_fastest,
+                column_config={
+                    "callsign": st.column_config.TextColumn("Callsign"),
+                    "icao24": st.column_config.TextColumn("ICAO24"),
+                    "origin_country": st.column_config.TextColumn("Origin country"),
+                    "velocity_kmh": st.column_config.NumberColumn("Speed (km/h)", format="%.0f km/h"),
+                    "baro_altitude": st.column_config.NumberColumn("Altitude (m)", format="%'.0f m"),
+                },
+                use_container_width=True,
+                hide_index=True,
+                height=360,
+            )
+
+    with tcol2:
+        st.markdown('<div class="sidebar-heading" style="margin-top:0;">Grounded aircraft</div>', unsafe_allow_html=True)
+        if not ground_df.empty:
+            display_ground = ground_df[
+                [c for c in ["callsign", "icao24", "origin_country", "latitude", "longitude"] if c in ground_df.columns]
+            ].head(10).copy()
+
+            st.dataframe(
+                display_ground,
+                column_config={
+                    "callsign": st.column_config.TextColumn("Callsign"),
+                    "icao24": st.column_config.TextColumn("ICAO24"),
+                    "origin_country": st.column_config.TextColumn("Origin country"),
+                    "latitude": st.column_config.NumberColumn("Latitude", format="%.4f"),
+                    "longitude": st.column_config.NumberColumn("Longitude", format="%.4f"),
+                },
+                use_container_width=True,
+                hide_index=True,
+                height=360,
+            )
+        else:
+            st.info("No grounded aircraft reported.")

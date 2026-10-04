@@ -1,0 +1,10 @@
+# Python byte-compiled files
+__pycache__/
+*.pyc
+
+# IDE folder outputs
+.vscode/
+
+# Dynamically generated pipeline outputs
+output/*.csv
+output/*.parquet

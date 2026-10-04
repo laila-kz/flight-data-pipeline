@@ -1,24 +1,4 @@
-#what is a data_pipeline ?
-#A data pipeline is a series of processes that extract, transform, and load (ETL) data from various sources to a destination, such as a data warehouse
-#  or database. It involves collecting data from different sources, cleaning and transforming it into a usable format, and then loading it into a storage 
-# system for analysis or further processing. Data pipelines are essential for managing and processing large volumes of data efficiently and ensuring that the 
-# data is accurate and up-to-date for decision-making purposes.
-
-#it mainly does three jobs :
-#1. get data
-#2. process data
-#3. show results
-
-
-#what is open sky : a web site that tracks real airplane flying in the sky 
-
-#what is spark : super robot that processes huge data very fast.
-
-
-#what we will do in this project :
-# Open sky flights --> spark pipeline  --> flights statistics
-
-#Ingest file : pulls flight data from openSky api and converts to dataframe :
+import logging
 import os
 import sys
 
@@ -33,32 +13,59 @@ from pyspark.sql.types import (
 )
 import requests
 
-os.environ["PYSPARK_PYTHON"] = sys.executable
-os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+# Configure logger
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
-spark = (
-    SparkSession.builder.master("local[*]")
-    .appName("FlightPipeline")
-    .getOrCreate()
-)
+# Explicit PySpark Schema for OpenSky API State Vectors
+OPENSKY_SCHEMA = StructType([
+    StructField("icao24", StringType(), True),
+    StructField("callsign", StringType(), True),
+    StructField("origin_country", StringType(), True),
+    StructField("time_position", LongType(), True),
+    StructField("last_contact", LongType(), True),
+    StructField("longitude", DoubleType(), True),
+    StructField("latitude", DoubleType(), True),
+    StructField("baro_altitude", DoubleType(), True),
+    StructField("on_ground", BooleanType(), True),
+    StructField("velocity", DoubleType(), True),
+])
+
+
+def get_spark_session() -> SparkSession:
+    """Get or create the local PySpark Session."""
+    os.environ["PYSPARK_PYTHON"] = sys.executable
+    os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+    return (
+        SparkSession.builder.master("local[*]")
+        .appName("FlightPipeline")
+        .getOrCreate()
+    )
 
 
 def _to_float(value):
     if value is None:
         return None
-    return float(value)
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
 
 
 def _to_int(value):
     if value is None:
         return None
-    return int(value)
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
 
 
 def _to_str(value):
     if value is None:
         return None
-    return str(value).strip()
+    val_str = str(value).strip()
+    return val_str if val_str else None
 
 
 def _to_bool(value):
@@ -67,37 +74,43 @@ def _to_bool(value):
     return bool(value)
 
 
-def ingest_flights():
-    url = "https://opensky-network.org/api/states/all"
-    response = requests.get(url, timeout=20)
-    response.raise_for_status()
-    payload = response.json()
-    states = payload.get("states") or []
+def ingest_flights(spark: SparkSession = None, url: str = "https://opensky-network.org/api/states/all", timeout: int = 20):
+    """
+    Ingests live flight state vectors from OpenSky API into a PySpark DataFrame.
+    Applies explicit schema definition and robust network/status error handling.
+    """
+    if spark is None:
+        spark = get_spark_session()
 
-    columns =[
-        "icao24","callsign","origin_country","time_position",
-        "last_contact","longitude","latitude","baro_altitude",
-        "on_ground","velocity"
+    try:
+        logger.info("Fetching flight states from OpenSky API: %s", url)
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.exceptions.RequestException as exc:
+        logger.error("HTTP request failure when contacting OpenSky API: %s", exc)
+        return spark.createDataFrame([], schema=OPENSKY_SCHEMA)
+    except Exception as exc:
+        logger.error("Unexpected error during API response parsing: %s", exc)
+        return spark.createDataFrame([], schema=OPENSKY_SCHEMA)
+
+    states = payload.get("states") if isinstance(payload, dict) else None
+    if not states:
+        logger.warning("OpenSky API returned empty state payload.")
+        return spark.createDataFrame([], schema=OPENSKY_SCHEMA)
+
+    logger.info("Received %d raw flight records from API response.", len(states))
+
+    columns = [
+        "icao24", "callsign", "origin_country", "time_position",
+        "last_contact", "longitude", "latitude", "baro_altitude",
+        "on_ground", "velocity"
     ]
-
-    schema = StructType(
-        [
-            StructField("icao24", StringType(), True),
-            StructField("callsign", StringType(), True),
-            StructField("origin_country", StringType(), True),
-            StructField("time_position", LongType(), True),
-            StructField("last_contact", LongType(), True),
-            StructField("longitude", DoubleType(), True),
-            StructField("latitude", DoubleType(), True),
-            StructField("baro_altitude", DoubleType(), True),
-            StructField("on_ground", BooleanType(), True),
-            StructField("velocity", DoubleType(), True),
-        ]
-    )
 
     rows = []
     for s in states:
-        # Normalize API types before creating the DataFrame to avoid Spark merge-type errors.
+        if not isinstance(s, list) or len(s) == 0:
+            continue
         rows.append(
             [
                 _to_str(s[0]) if len(s) > 0 else None,
@@ -113,7 +126,5 @@ def ingest_flights():
             ]
         )
 
-    df = spark.createDataFrame(rows, schema=schema)
-    df = df.select(columns)
-    return df
-
+    df = spark.createDataFrame(rows, schema=OPENSKY_SCHEMA)
+    return df.select(columns)

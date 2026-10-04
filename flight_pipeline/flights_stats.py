@@ -1,33 +1,34 @@
-# the transform / process step of the pipeline : takes the ingested data and computes statistics on it
+"""
+Aggregations and Analytics Transformations for Flight Data Pipeline.
+"""
 
-from pyspark.sql.functions import count, countDistinct, max
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
 
-def flight_stats(df):
-    stats = df.agg(
-        count("*").alias("num_events"),
-        countDistinct("icao24").alias("distinct_aircraft"),
-        max("velocity").alias("max_velocity")
+
+def flight_stats(df: DataFrame) -> DataFrame:
+    """Computes high-level KPI summary statistics across flight records."""
+    return df.agg(
+        F.count("*").alias("num_events"),
+        F.countDistinct("icao24").alias("distinct_aircraft"),
+        F.max("velocity").alias("max_velocity")
     )
-    return stats
 
 
-# aircraft by country
-def aircraft_by_country(df):
+def aircraft_by_country(df: DataFrame) -> DataFrame:
+    """Aggregates distinct aircraft count grouped by origin country."""
     return (
         df.groupBy("origin_country")
-        .agg(countDistinct("icao24").alias("num_aircraft"))
-        .orderBy("num_aircraft", ascending=False)
+        .agg(F.countDistinct("icao24").alias("num_aircraft"))
+        .orderBy(F.col("num_aircraft").desc())
     )
 
-#fastest flights 
-from pyspark.sql.functions import col 
-def fastest_flights(df):
-    return df.orderBy(col("velocity").desc()).limit(10)
+
+def fastest_flights(df: DataFrame) -> DataFrame:
+    """Extracts the top 10 fastest flight positions ordered by velocity descending."""
+    return df.orderBy(F.col("velocity").desc()).limit(10)
 
 
-
-#flights on ground
-def flights_on_ground(df):
-    return df.filter(col("on_ground") == True)
-
-
+def flights_on_ground(df: DataFrame) -> DataFrame:
+    """Filters flight observations for aircraft currently reported on ground."""
+    return df.filter(F.col("on_ground") == True)

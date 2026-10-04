@@ -1,0 +1,7 @@
+pyspark
+requests
+pandas
+streamlit
+plotly
+pytest
+flake8
